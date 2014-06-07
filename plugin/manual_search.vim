@@ -18,7 +18,7 @@ endif
 
 if !exists("g:php_symfony2_manual_dir_path")
   " http://symfony.com/doc/current/index.html
-  let g:php_symfony2_manual_dir_path = $HOME . "/Book/Refernce/php/api.symfony.com/2.4/"
+  let g:php_symfony2_manual_dir_path = $HOME . "/Book/Refernce/php/symfony-document/"
 endif
 
 if !exists("g:php_symfony2_api_manual_dir_path")
@@ -84,17 +84,16 @@ if !has('ruby')
   finish
 endif
 
-" 创建缓存
+" 创建索引
 ruby <<_EOF_
   require "json"
-  $manual_search_w3m_buffer_num = nil
-  def gen_cache
+  $manual_search_w3m_buffer_num = {}
+  def gen_php_index
     data = {
       "function" => [],
       "class" => [],
     }
     path = VIM::evaluate("g:php_manual_dir_path")
-    p path
     Dir["#{path}/function*.html"].each do |f|
       name = File::basename f
       data["function"].push name
@@ -103,36 +102,91 @@ ruby <<_EOF_
       name = File::basename f
       data["class"].push name
     end
-    File.write "#{Dir.home}/.vim_php_manual_cache", JSON::dump(data)
+    begin
+      File.write "#{Dir.home}/.vim_php_manual_index", JSON::dump(data)
+    rescue
+      return nil
+    end
     data
   end
-  def get_cache
+  def get_php_index
     begin
-      data = JSON::load File.read "#{Dir.home}/.vim_php_manual_cache"
+      data = JSON::load File.read "#{Dir.home}/.vim_php_manual_index"
     rescue
       data = nil
     end
     if !data then
-      data = gen_cache
+      data = gen_php_index
     end
     data
+  end
+  def gen_php_sf_api_index
+    require "find"
+    require "nokogiri"
+    begin
+      path = VIM::evaluate "g:php_symfony2_api_manual_dir_path"
+      File.open("#{Dir.home}/.vim_php_sf_api_index", "wb") do |fp|
+        Find.find("#{path}/Symfony").each do |f|
+          if File.extname(f) != ".html" then
+            next
+          end
+          if File.exists? f[0..-6] then
+            next
+          end
+          #p f
+          file = f[path.length+1..-1]
+          base_dir = File.dirname(file)
+          Nokogiri::HTML.parse(File.read f).xpath('//div[@class="content"]/table/tr').each do |tr|
+            td = tr.xpath('td')
+            if td.length == 3
+              td = td[1]
+            else
+              td = td[0]
+            end
+            f3 = td.xpath('a')
+            if f3.length > 0 then
+              f3 = File.join(base_dir, f3[0].attr('href'))
+            else
+              f3 = file
+            end
+            s = td.text.strip.gsub("\n", "")
+            fp.write "#{f3} | #{s}\n"
+          end
+        end
+      end
+    end
   end
 _EOF_
 
 " 使用w3m打开文档文件
 function! s:OpenUrl()
-"ruby <<_EOF_
-"  uri = VIM::evaluate("b:manual_path") + $curbuf[$curbuf.line_number]
-"  p "#{$curbuf.number} #{$curbuf.name}"
-"  if $manual_search_w3m_buffer_num && VIM::Buffer[$manual_search_w3m_buffer_num] then
-"    VIM::Buffer[$manual_search_w3m_buffer_num].command("W3m #{uri}")
-"  else
-"    $curbuf.command("W3mTab #{uri}")
-"    p "#{$curbuf.number} #{$curbuf.name}"
-"  end
-"_EOF_
-  let uri = getline('.')
-  execute "W3mTab local " . b:manual_path . uri
+ruby <<_EOF_
+  uri = VIM::evaluate("b:manual_path") + $curbuf[$curbuf.line_number].split(' | ')[0]
+  manual_type = VIM::evaluate("b:manual_type")
+  w3m_buffer_num = $manual_search_w3m_buffer_num[manual_type]
+  if VIM::Window.count == 1 then
+    VIM.command("vert botright vsplit")
+  else
+    VIM.command("wincmd w")
+  end
+  if w3m_buffer_num then
+    buffer_num = w3m_buffer_num
+    w3m_buffer_num = nil
+    i = 0
+    while i < VIM::Buffer.count
+      if VIM::Buffer[i].number == buffer_num then
+        w3m_buffer_num = buffer_num
+        break
+      end
+      i = i + 1
+    end
+  end
+  if w3m_buffer_num then
+    VIM.command("b#{w3m_buffer_num}")
+  end
+  VIM.command("W3m #{uri}")
+  $manual_search_w3m_buffer_num[manual_type] = $curbuf.number
+_EOF_
 endfunction
 
 " 按键绑定
@@ -146,19 +200,20 @@ function! s:MapKeys()
 endfunction
 
 " PHP文档搜索
-function! s:ManualPHPCache()
+function! s:ManualPHPIndex()
 ruby <<_EOF_
-  gen_cache
+  gen_php_index
 _EOF_
 endfunction
 
-function! s:ManualPHPSearch(args)
+function! s:ManualPHP(args)
   topleft new
   setlocal buftype=nofile
   let b:manual_path = g:php_manual_dir_path
+  let b:manual_type = "php"
 
 ruby <<_EOF_
-  data = get_cache
+  data = get_php_index
   if data
     i = 0
     key = VIM::evaluate "a:args"
@@ -184,6 +239,58 @@ _EOF_
   setlocal bufhidden=hide
 endfunction
 
-command! -nargs=1 -range ManualPHPSearch :call s:ManualPHPSearch(<f-args>)
-command! -nargs=0 ManualPHPCache :call s:ManualPHPCache()
+" Symfony api搜索
+function! s:ManualSFIndex()
+ruby <<_EOF_
+  gen_php_sf_api_index
+_EOF_
+endfunction
+
+function! s:ManualSF(args)
+  topleft new
+  setlocal buftype=nofile
+  let b:manual_path = g:php_symfony2_api_manual_dir_path
+  let b:manual_type = "sf_api"
+
+ruby <<_EOF_
+  i = 0
+  key = VIM::evaluate "a:args"
+  key.downcase!
+  key.gsub!('-', '_')
+  keys = key.split
+  begin
+    if keys.length > 0 then
+      File.open("#{Dir.home}/.vim_php_sf_api_index").each { |line|
+        value = line.gsub('-', '_')
+        value.downcase!
+        is_include = true
+        keys.each do |k|
+          if !value.include?(k) then
+            is_include = false
+            break
+          end
+        end
+        if !is_include then
+          next
+        end
+        if i == 0 then
+          $curbuf[1] = line
+          i = i + 1
+        else
+          $curbuf.append $curbuf.line_number-1, line
+        end
+      }
+    end
+  end
+_EOF_
+
+  call s:MapKeys()
+  setlocal buftype=nofile readonly nomodifiable nowrap
+  setlocal bufhidden=hide
+endfunction
+
+command! -nargs=1 -range ManualPHP :call s:ManualPHP(<f-args>)
+command! -nargs=0 ManualPHPIndex :call s:ManualPHPIndex()
+command! -nargs=1 -range ManualSF :call s:ManualSF(<f-args>)
+command! -nargs=0 ManualSFIndex :call s:ManualSFIndex()
 
